@@ -1,0 +1,84 @@
+name: Sign and Notarize macOS Electron App
+
+on:
+  workflow_dispatch:
+
+jobs:
+  sign-and-notarize:
+    runs-on: macos-latest 
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Import Apple Certificate
+        uses: apple-actions/import-codesign-certs@v1
+        with:
+          p12-file-base64: ${{ secrets.APPLE_CERT }}
+          p12-password: ${{ secrets.APPLE_PASS }}
+
+      - name: Sign .dmg file
+        run: |
+          # Sign the .dmg file
+          codesign --deep --force --verify --verbose --sign "${{ secrets.APPLE_CERTIFICATE_ID }}" "./dist/Launcher-Tested.dmg"
+
+      - name: Notarize .dmg file
+        run: |
+          # Submit the .dmg file for notarization
+          xcrun notarytool submit "./dist/Launcher-Tested.dmg" \
+            --apple-id "${{ secrets.APPLE_ID }}" \
+            --password "${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}" \
+            --team-id "${{ secrets.APPLE_TEAM_ID }}" \
+            --wait
+
+      - name: Staple Notarization Ticket
+        run: |
+          # Staple the notarization ticket to the .dmg file
+          xcrun stapler staple "./dist/Launcher-Tested.dmg"
+
+      - name: Get version from latest.yml
+        id: version
+        run: |
+          version=$(yq e '.version' ./dist/latest.yml)
+          echo "version=${version}" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          body: |
+            Last release version
+          tag_name: v${{ steps.version.outputs.version }}
+          release_name: v${{ steps.version.outputs.version }}
+          draft: false
+          prerelease: true
+
+      - name: Upload assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          max_retries=5
+          retry_count=0
+          
+          for file in ./dist/*; do
+            while [ $retry_count -lt $max_retries ]; do
+              echo "Attempting to upload $file (attempt $((retry_count + 1)))"
+              gh release upload "v${{ steps.version.outputs.version }}" "$file"
+          
+              if [[ $? -eq 0 ]]; then
+                echo "File $file uploaded successfully."
+                break
+              else
+                echo "Error uploading $file. Retrying in 5 seconds..."
+                sleep 5
+                retry_count=$((retry_count + 1))
+              fi
+            done
+          
+            if [ $retry_count -eq $max_retries ]; then
+              echo "Failed to upload $file after $max_retries attempts."
+              exit 1
+            fi
+          done
